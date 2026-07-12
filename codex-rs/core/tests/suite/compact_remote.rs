@@ -541,6 +541,92 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn remote_compact_retries_capacity_errors() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| config.model_provider.request_max_retries = Some(0)),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    responses::mount_sse_once(
+        harness.server(),
+        responses::sse(vec![
+            responses::ev_assistant_message("m1", "FIRST_REMOTE_REPLY"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let overloaded = || {
+        ResponseTemplate::new(503).set_body_json(json!({
+            "error": {
+                "code": "server_is_overloaded",
+                "message": "selected model is at capacity",
+            }
+        }))
+    };
+    let compact_mock = responses::mount_compact_response_sequence(
+        harness.server(),
+        vec![
+            overloaded(),
+            overloaded(),
+            overloaded(),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "output": compacted_summary_only_output("RECOVERED_REMOTE_SUMMARY"),
+            })),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello remote compact".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex.submit(Op::Compact).await?;
+    let mut retry_messages = Vec::new();
+    loop {
+        match codex.next_event().await?.msg {
+            EventMsg::StreamError(event) => {
+                if event.codex_error_info == Some(CodexErrorInfo::ServerOverloaded) {
+                    retry_messages.push(event.message);
+                }
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(600)).await;
+                tokio::time::resume();
+            }
+            EventMsg::Error(event) => panic!("remote compaction failed: {}", event.message),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        retry_messages,
+        vec![
+            "Reconnecting... 1/3",
+            "Reconnecting... 2/3",
+            "Reconnecting... 3/3",
+        ]
+    );
+    assert_eq!(compact_mock.requests().len(), 4);
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_uses_agent_identity_assertion() -> Result<()> {
     skip_if_no_network!(Ok(()));

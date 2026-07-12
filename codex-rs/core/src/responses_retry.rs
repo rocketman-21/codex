@@ -15,15 +15,52 @@ use tracing::warn;
 
 const SERVER_OVERLOADED_MAX_RETRIES: u64 = 3;
 const SERVER_OVERLOADED_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(10),
     Duration::from_secs(30),
     Duration::from_secs(120),
-    Duration::from_secs(300),
 ];
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
     Sampling,
+    RemoteCompaction,
     RemoteCompactionV2,
+}
+
+pub(crate) async fn handle_server_overloaded_response_error(
+    retries: &mut u64,
+    err: CodexErr,
+    sess: &Session,
+    turn_context: &TurnContext,
+    request: ResponsesStreamRequest,
+    cancellation_token: CancellationToken,
+) -> Result<(), CodexErr> {
+    if !matches!(err, CodexErr::ServerOverloaded) || *retries >= SERVER_OVERLOADED_MAX_RETRIES {
+        return Err(err);
+    }
+
+    *retries += 1;
+    let retry_count = *retries;
+    let delay =
+        positive_jitter(SERVER_OVERLOADED_RETRY_DELAYS[retry_count.saturating_sub(1) as usize]);
+    log_retry(
+        request,
+        turn_context,
+        &err,
+        retry_count,
+        SERVER_OVERLOADED_MAX_RETRIES,
+        delay,
+    );
+    sess.notify_stream_error(
+        turn_context,
+        format!("Reconnecting... {retry_count}/{SERVER_OVERLOADED_MAX_RETRIES}"),
+        err,
+    )
+    .await;
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Ok(()),
+        () = cancellation_token.cancelled() => Err(CodexErr::TurnAborted),
+    }
 }
 
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
@@ -39,14 +76,18 @@ pub(crate) async fn handle_retryable_response_stream_error(
     request: ResponsesStreamRequest,
     cancellation_token: CancellationToken,
 ) -> Result<(), CodexErr> {
-    let is_server_overloaded = matches!(&err, CodexErr::ServerOverloaded);
-    let max_retries = if is_server_overloaded {
-        SERVER_OVERLOADED_MAX_RETRIES
-    } else {
-        max_retries
-    };
-    if !is_server_overloaded
-        && *retries >= max_retries
+    if matches!(err, CodexErr::ServerOverloaded) {
+        return handle_server_overloaded_response_error(
+            retries,
+            err,
+            sess,
+            turn_context,
+            request,
+            cancellation_token,
+        )
+        .await;
+    }
+    if *retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             &turn_context.model_info,
@@ -67,9 +108,6 @@ pub(crate) async fn handle_retryable_response_stream_error(
         *retries += 1;
         let retry_count = *retries;
         let delay = match &err {
-            CodexErr::ServerOverloaded => positive_jitter(
-                SERVER_OVERLOADED_RETRY_DELAYS[retry_count.saturating_sub(1) as usize],
-            ),
             CodexErr::Stream(_, requested_delay) => {
                 requested_delay.unwrap_or_else(|| backoff(retry_count))
             }
@@ -79,8 +117,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
 
         // In release builds, hide the first websocket retry notification to reduce noisy
         // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
-        let report_error = is_server_overloaded
-            || retry_count > 1
+        let report_error = retry_count > 1
             || cfg!(debug_assertions)
             || !sess.services.model_client.responses_websocket_enabled();
         if report_error {
@@ -114,6 +151,15 @@ fn log_retry(
         ResponsesStreamRequest::Sampling => {
             warn!(
                 "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+            );
+        }
+        ResponsesStreamRequest::RemoteCompaction => {
+            warn!(
+                turn_id = %turn_context.sub_id,
+                retries,
+                max_retries,
+                compact_error = %err,
+                "remote compaction request failed; retrying after delay"
             );
         }
         ResponsesStreamRequest::RemoteCompactionV2 => {

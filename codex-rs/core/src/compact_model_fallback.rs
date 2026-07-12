@@ -2,6 +2,7 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionReason;
 use codex_otel::SessionTelemetry;
 use codex_protocol::error::CodexErr;
+use codex_protocol::protocol::CodexErrorInfo;
 use tracing::warn;
 
 pub(crate) fn record_model_fallback(
@@ -49,13 +50,20 @@ pub(crate) fn record_model_fallback(
 }
 
 /// Preserve the previous-model rejection unless the fallback exposes a
-/// user-actionable recovery signal or cancellation.
+/// specific client-visible error or cancellation.
 pub(crate) fn select_model_fallback_error(
     original_error: CodexErr,
     fallback_error: CodexErr,
 ) -> CodexErr {
-    match fallback_error {
-        error @ (CodexErr::ServerOverloaded | CodexErr::TurnAborted) => error,
-        _ => original_error,
+    if matches!(&fallback_error, CodexErr::TurnAborted)
+        || fallback_error.to_codex_protocol_error() != CodexErrorInfo::Other
+    {
+        fallback_error
+    } else {
+        original_error
     }
 }
+
+#[cfg(test)]
+#[path = "compact_model_fallback_tests.rs"]
+mod tests;

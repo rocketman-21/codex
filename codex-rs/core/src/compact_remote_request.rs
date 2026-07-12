@@ -7,10 +7,14 @@ use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
+use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::handle_server_overloaded_response_error;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn::built_tools;
+use codex_async_utils::OrCancelExt;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_rollout_trace::CompactionTraceContext;
@@ -29,6 +33,7 @@ pub(super) async fn run_remote_compact_attempt(
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
+    cancellation_token: &CancellationToken,
 ) -> CodexResult<RemoteCompactAttempt> {
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
@@ -59,12 +64,7 @@ pub(super) async fn run_remote_compact_attempt(
     }
     let trace_input_history = history.raw_items().to_vec();
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = built_tools(
-        sess.as_ref(),
-        step_context.as_ref(),
-        &CancellationToken::new(),
-    )
-    .await?;
+    let tool_router = built_tools(sess.as_ref(), step_context.as_ref(), cancellation_token).await?;
     let prompt = Prompt {
         input: prompt_input,
         tools: tool_router.model_visible_specs(),
@@ -79,27 +79,54 @@ pub(super) async fn run_remote_compact_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
-    let new_history = sess
-        .services
-        .model_client
-        .compact_conversation_history(
-            &prompt,
-            &turn_context.model_info,
-            turn_state,
-            CompactConversationRequestSettings {
-                effort: turn_context.reasoning_effort.clone(),
-                summary: turn_context.reasoning_summary,
-                service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
-                    None
-                } else {
-                    turn_context.config.service_tier.clone()
+    let mut server_overloaded_retries = 0;
+    let new_history = loop {
+        let result = sess
+            .services
+            .model_client
+            .compact_conversation_history(
+                &prompt,
+                &turn_context.model_info,
+                turn_state.clone(),
+                CompactConversationRequestSettings {
+                    effort: turn_context.reasoning_effort.clone(),
+                    summary: turn_context.reasoning_summary,
+                    service_tier: if sess.services.auth_manager.auth_mode()
+                        == Some(AuthMode::ApiKey)
+                    {
+                        None
+                    } else {
+                        turn_context.config.service_tier.clone()
+                    },
                 },
-            },
-            &turn_context.session_telemetry,
-            compaction_trace,
-            &responses_metadata,
-        )
-        .await?;
+                &turn_context.session_telemetry,
+                compaction_trace,
+                &responses_metadata,
+            )
+            .or_cancel(cancellation_token)
+            .await
+            .map_err(|_| CodexErr::TurnAborted)?;
+        match result {
+            Ok(new_history) => break new_history,
+            Err(err)
+                if matches!(err, CodexErr::ServerOverloaded)
+                    && !crate::guardian::is_guardian_reviewer_source(
+                        &turn_context.session_source,
+                    ) =>
+            {
+                handle_server_overloaded_response_error(
+                    &mut server_overloaded_retries,
+                    err,
+                    sess,
+                    turn_context,
+                    ResponsesStreamRequest::RemoteCompaction,
+                    cancellation_token.child_token(),
+                )
+                .await?;
+            }
+            Err(err) => return Err(err),
+        }
+    };
     Ok(RemoteCompactAttempt {
         new_history,
         trace_input_history,
