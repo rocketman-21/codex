@@ -1,4 +1,5 @@
 use super::*;
+use crate::chatwidget::input_queue::PendingInputPreview;
 use pretty_assertions::assert_eq;
 
 const SAFETY_BUFFERING_HEADER_TEXT: &str =
@@ -1145,6 +1146,82 @@ async fn live_app_server_server_overloaded_error_renders_warning() {
 }
 
 #[tokio::test]
+async fn live_app_server_server_overloaded_before_input_restores_prompt_without_autosend() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    let prompt = UserMessage::from("original request");
+    chat.submit_user_message(prompt.clone());
+    assert_matches!(next_submit_op(&mut op_rx), Op::UserTurn { .. });
+    drain_insert_history(&mut rx);
+
+    chat.handle_server_notification(
+        ServerNotification::TurnStarted(TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: AppServerTurn {
+                id: "turn-1".to_string(),
+                items_view: codex_app_server_protocol::TurnItemsView::Full,
+                items: Vec::new(),
+                status: AppServerTurnStatus::InProgress,
+                error: None,
+                started_at: Some(0),
+                completed_at: None,
+                duration_ms: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    drain_insert_history(&mut rx);
+    chat.input_queue
+        .queued_user_messages
+        .push_back(UserMessage::from("follow-up").into());
+    chat.input_queue
+        .queued_user_message_history_records
+        .push_back(UserMessageHistoryRecord::UserMessageText);
+
+    chat.handle_server_notification(
+        ServerNotification::Error(ErrorNotification {
+            error: AppServerTurnError {
+                message: "server overloaded".to_string(),
+                codex_error_info: Some(CodexErrorInfo::ServerOverloadedBeforeInput),
+                additional_details: None,
+            },
+            will_retry: false,
+            thread_id: thread_id.to_string(),
+            turn_id: "turn-1".to_string(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let mut cells = Vec::new();
+    let mut dropped_optimistic_turn = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::InsertHistoryCell(cell) => cells.push(cell.display_lines(/*width*/ 80)),
+            AppEvent::DropOptimisticUserTurn => dropped_optimistic_turn = true,
+            AppEvent::RestoreCancelledTurn(_) => {
+                panic!("unrecorded input must not trigger a server rollback")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(cells.len(), 1);
+    assert_eq!(lines_to_single_string(&cells[0]), "⚠ server overloaded\n");
+    assert!(dropped_optimistic_turn);
+    assert_eq!(chat.composer_text_with_pending(), prompt.text);
+    assert_eq!(
+        chat.input_queue.preview(),
+        PendingInputPreview {
+            queued_messages: vec!["follow-up".to_string()],
+            pending_steers: Vec::new(),
+            rejected_steers: Vec::new(),
+        }
+    );
+    assert_no_submit_op(&mut op_rx);
+    assert!(!chat.bottom_pane.is_task_running());
+}
+
+#[tokio::test]
 async fn live_app_server_cyber_policy_error_renders_dedicated_notice() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -1212,7 +1289,9 @@ async fn app_server_safety_access_errors_render_dedicated_notice() {
     let mut rendered_cases = Vec::new();
     for (case, message) in cases {
         let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-        chat.handle_non_retry_error(message, /*codex_error_info*/ None);
+        chat.handle_non_retry_error(
+            /*turn_id*/ None, message, /*codex_error_info*/ None,
+        );
 
         let cells = drain_insert_history(&mut rx);
         assert_eq!(cells.len(), 1);

@@ -262,6 +262,9 @@ pub(crate) enum AppEvent {
     /// Restore an output-free interrupted turn into the composer and roll it back.
     RestoreCancelledTurn(UserMessage),
 
+    /// Drop a locally rendered user turn that core never committed.
+    DropOptimisticUserTurn,
+
     /// Approve one retry of a recent auto-review denial selected in the TUI.
     ApproveRecentAutoReviewDenial {
         thread_id: ThreadId,

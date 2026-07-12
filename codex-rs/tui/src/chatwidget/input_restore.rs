@@ -5,11 +5,52 @@ use std::collections::HashSet;
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
+enum CancelEditAction {
+    RestoreLocally {
+        prompt: UserMessage,
+        prompt_displayed: bool,
+    },
+    RollbackAndRestore(UserMessage),
+}
+
 impl ChatWidget {
-    pub(super) fn record_cancel_edit_candidate(&mut self, prompt: UserMessage) {
+    pub(super) fn record_cancel_edit_candidate(
+        &mut self,
+        prompt: UserMessage,
+        client_user_message_id: String,
+    ) {
+        self.input_queue.user_turn_pending_start = true;
         self.cancel_edit.prompt = Some(prompt);
+        self.cancel_edit.client_user_message_id = Some(client_user_message_id);
+        self.cancel_edit.turn_id = None;
+        self.cancel_edit.input_committed = false;
         self.cancel_edit.eligible = true;
         self.cancel_edit.armed = false;
+        self.cancel_edit_prompt_displayed = true;
+    }
+
+    pub(crate) fn bind_cancel_edit_turn(&mut self, turn_id: &str) {
+        if self.cancel_edit.prompt.is_some() && self.cancel_edit.turn_id.is_none() {
+            self.cancel_edit.turn_id = Some(turn_id.to_string());
+        }
+    }
+
+    pub(super) fn mark_cancel_edit_input_committed(
+        &mut self,
+        turn_id: &str,
+        client_user_message_id: Option<&str>,
+    ) {
+        if self.cancel_edit.client_user_message_id.as_deref() == client_user_message_id
+            && client_user_message_id.is_some()
+            && self
+                .cancel_edit
+                .turn_id
+                .as_deref()
+                .is_none_or(|candidate_turn_id| candidate_turn_id == turn_id)
+        {
+            self.cancel_edit.turn_id = Some(turn_id.to_string());
+            self.cancel_edit.input_committed = true;
+        }
     }
 
     pub(super) fn record_visible_turn_activity(&mut self) {
@@ -19,6 +60,7 @@ impl ChatWidget {
 
     pub(super) fn arm_cancel_edit(&mut self) {
         self.cancel_edit.armed = self.cancel_edit.eligible
+            && self.cancel_edit.input_committed
             && self.cancel_edit.prompt.is_some()
             && self.bottom_pane.composer_is_empty()
             && self.input_queue.pending_steers.is_empty()
@@ -26,16 +68,44 @@ impl ChatWidget {
             && !self.active_side_conversation;
     }
 
-    fn take_armed_cancel_edit_prompt(&mut self, reason: TurnAbortReason) -> Option<UserMessage> {
-        (reason == TurnAbortReason::Interrupted
+    fn take_cancel_edit_action(&mut self, reason: TurnAbortReason) -> Option<CancelEditAction> {
+        let restore_locally =
+            self.cancel_edit.prompt.is_some() && !self.cancel_edit.input_committed;
+        let rollback_and_restore = reason == TurnAbortReason::Interrupted
+            && self.cancel_edit.input_committed
             && self.cancel_edit.armed
-            && self.cancel_edit.eligible)
-            .then(|| self.cancel_edit.prompt.take())
+            && self.cancel_edit.eligible;
+        if !restore_locally && !rollback_and_restore {
+            return None;
+        }
+
+        let prompt = self.cancel_edit.prompt.take()?;
+        if restore_locally {
+            Some(CancelEditAction::RestoreLocally {
+                prompt,
+                prompt_displayed: std::mem::take(&mut self.cancel_edit_prompt_displayed),
+            })
+        } else {
+            Some(CancelEditAction::RollbackAndRestore(prompt))
+        }
+    }
+
+    pub(super) fn take_uncommitted_prompt_for_turn(
+        &mut self,
+        turn_id: &str,
+    ) -> Option<(UserMessage, bool)> {
+        (self.cancel_edit.turn_id.as_deref() == Some(turn_id) && !self.cancel_edit.input_committed)
+            .then(|| {
+                let prompt = self.cancel_edit.prompt.take()?;
+                let prompt_displayed = std::mem::take(&mut self.cancel_edit_prompt_displayed);
+                Some((prompt, prompt_displayed))
+            })
             .flatten()
     }
 
     pub(super) fn clear_cancel_edit(&mut self) {
         self.cancel_edit = CancelEditState::default();
+        self.cancel_edit_prompt_displayed = false;
     }
 
     pub(crate) fn set_initial_user_message_submit_suppressed(&mut self, suppressed: bool) {
@@ -147,13 +217,13 @@ impl ChatWidget {
     /// When there are queued user messages, restore them into the composer
     /// separated by newlines rather than auto-submitting the next one.
     pub(super) fn on_interrupted_turn(&mut self, reason: TurnAbortReason) {
-        let cancelled_prompt = self.take_armed_cancel_edit_prompt(reason);
+        let cancel_edit_action = self.take_cancel_edit_action(reason);
         // Finalize, log a gentle prompt, and clear running state.
         self.finalize_turn();
         let send_pending_steers_immediately =
             self.input_queue.submit_pending_steers_after_interrupt;
         self.input_queue.submit_pending_steers_after_interrupt = false;
-        if cancelled_prompt.is_none()
+        if cancel_edit_action.is_none()
             && self.interrupted_turn_notice_mode != InterruptedTurnNoticeMode::Suppress
         {
             if send_pending_steers_immediately {
@@ -189,9 +259,16 @@ impl ChatWidget {
             self.restore_composer_state(combined);
         }
         self.refresh_pending_input_preview();
-        if let Some(prompt) = cancelled_prompt {
-            self.app_event_tx
-                .send(AppEvent::RestoreCancelledTurn(prompt));
+        match cancel_edit_action {
+            Some(CancelEditAction::RestoreLocally {
+                prompt,
+                prompt_displayed,
+            }) => self.restore_uncommitted_prompt(prompt, prompt_displayed),
+            Some(CancelEditAction::RollbackAndRestore(prompt)) => {
+                self.app_event_tx
+                    .send(AppEvent::RestoreCancelledTurn(prompt));
+            }
+            None => {}
         }
 
         self.request_redraw();
@@ -298,6 +375,40 @@ impl ChatWidget {
         ));
     }
 
+    pub(super) fn restore_uncommitted_prompt(
+        &mut self,
+        prompt: UserMessage,
+        prompt_displayed: bool,
+    ) {
+        if prompt_displayed {
+            self.app_event_tx.send(AppEvent::DropOptimisticUserTurn);
+        }
+
+        let draft = self.bottom_pane.composer_draft_snapshot();
+        let pending_pastes = draft.pending_pastes;
+        let draft_message = UserMessage {
+            text: draft.text,
+            local_images: draft.local_images,
+            remote_image_urls: draft.remote_image_urls,
+            text_elements: draft.text_elements,
+            mention_bindings: draft.mention_bindings,
+        };
+        let restored = if draft_message.text.is_empty()
+            && draft_message.local_images.is_empty()
+            && draft_message.remote_image_urls.is_empty()
+        {
+            prompt
+        } else {
+            merge_user_messages(vec![prompt, draft_message])
+        };
+        self.restore_composer_state(Self::composer_state_from_user_message(
+            restored,
+            pending_pastes,
+        ));
+        self.refresh_pending_input_preview();
+        self.request_redraw();
+    }
+
     pub(super) fn restore_composer_state(&mut self, composer: ThreadComposerState) {
         let ThreadComposerState {
             text,
@@ -351,6 +462,7 @@ impl ChatWidget {
         };
         Some(ThreadInputState {
             composer: composer.has_content().then_some(composer),
+            cancel_edit: self.cancel_edit.clone(),
             pending_steers: self
                 .input_queue
                 .pending_steers
@@ -392,6 +504,8 @@ impl ChatWidget {
             self.turn_lifecycle
                 .restore_running(input_state.agent_turn_running, Instant::now());
             self.input_queue.user_turn_pending_start = input_state.user_turn_pending_start;
+            self.cancel_edit = input_state.cancel_edit;
+            self.cancel_edit_prompt_displayed = false;
             self.update_collaboration_mode_indicator();
             self.refresh_model_dependent_surfaces();
             self.restore_composer_state(input_state.composer.unwrap_or_default());
@@ -435,6 +549,7 @@ impl ChatWidget {
             self.turn_lifecycle
                 .restore_running(/*running*/ false, Instant::now());
             self.input_queue.clear();
+            self.clear_cancel_edit();
             self.restore_composer_state(Default::default());
         }
         self.turn_lifecycle

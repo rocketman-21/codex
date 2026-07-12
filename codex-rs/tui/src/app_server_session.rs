@@ -773,6 +773,7 @@ impl AppServerSession {
         &mut self,
         thread_id: ThreadId,
         items: Vec<UserInput>,
+        client_user_message_id: String,
         cwd: PathBuf,
         approval_policy: AskForApproval,
         approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
@@ -794,7 +795,7 @@ impl AppServerSession {
                 request_id,
                 params: TurnStartParams {
                     thread_id: thread_id.to_string(),
-                    client_user_message_id: None,
+                    client_user_message_id: Some(client_user_message_id),
                     input: items,
                     responsesapi_client_metadata: None,
                     additional_context: None,
@@ -850,6 +851,7 @@ impl AppServerSession {
         thread_id: ThreadId,
         turn_id: String,
         items: Vec<UserInput>,
+        client_user_message_id: String,
     ) -> std::result::Result<TurnSteerResponse, TypedRequestError> {
         let request_id = self.next_request_id();
         self.client
@@ -857,7 +859,7 @@ impl AppServerSession {
                 request_id,
                 params: TurnSteerParams {
                     thread_id: thread_id.to_string(),
-                    client_user_message_id: None,
+                    client_user_message_id: Some(client_user_message_id),
                     input: items,
                     responsesapi_client_metadata: None,
                     additional_context: None,

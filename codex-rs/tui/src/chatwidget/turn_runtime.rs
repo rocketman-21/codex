@@ -57,7 +57,13 @@ impl ChatWidget {
     // Raw reasoning uses the same flow as summarized reasoning
 
     pub(super) fn on_task_started(&mut self) {
+        let started_from_local_submission = self.input_queue.user_turn_pending_start;
         self.input_queue.user_turn_pending_start = false;
+        let resumed_cancel_edit_turn = self.cancel_edit.prompt.is_some()
+            && self.cancel_edit.turn_id.as_deref() == self.turn_lifecycle.last_turn_id.as_deref();
+        if !started_from_local_submission && !resumed_cancel_edit_turn {
+            self.clear_cancel_edit();
+        }
         self.reset_safety_buffering_for_turn_start();
         self.turn_lifecycle.start(Instant::now());
         self.transcript.reset_turn_flags();
@@ -338,7 +344,7 @@ impl ChatWidget {
         self.maybe_show_pending_rate_limit_prompt();
     }
 
-    pub(super) fn on_server_overloaded_error(&mut self, message: String) {
+    fn finish_server_overloaded_error(&mut self, message: String) {
         self.input_queue.submit_pending_steers_after_interrupt = false;
         self.finalize_turn();
 
@@ -350,7 +356,32 @@ impl ChatWidget {
 
         self.add_to_history(history_cell::new_warning_event(message));
         self.request_redraw();
+    }
+
+    pub(super) fn on_server_overloaded_error(&mut self, message: String) {
+        self.finish_server_overloaded_error(message);
         self.maybe_send_next_queued_input();
+    }
+
+    pub(super) fn on_server_overloaded_before_input_error(
+        &mut self,
+        turn_id: &str,
+        message: String,
+    ) {
+        let unrecorded_prompt = self.take_uncommitted_prompt_for_turn(turn_id);
+        if unrecorded_prompt
+            .as_ref()
+            .is_some_and(|(_, prompt_displayed)| *prompt_displayed)
+        {
+            self.app_event_tx.send(AppEvent::DropOptimisticUserTurn);
+        }
+        self.finish_server_overloaded_error(message);
+
+        if let Some((prompt, _)) = unrecorded_prompt {
+            self.restore_uncommitted_prompt(prompt, /*prompt_displayed*/ false);
+        } else {
+            self.maybe_send_next_queued_input();
+        }
     }
 
     pub(super) fn on_error(&mut self, message: String) {
@@ -425,6 +456,7 @@ impl ChatWidget {
 
     pub(super) fn handle_non_retry_error(
         &mut self,
+        turn_id: Option<&str>,
         message: String,
         codex_error_info: Option<AppServerCodexErrorInfo>,
     ) {
@@ -456,6 +488,13 @@ impl ChatWidget {
         {
             match info {
                 RateLimitErrorKind::ServerOverloaded => self.on_server_overloaded_error(message),
+                RateLimitErrorKind::ServerOverloadedBeforeInput => {
+                    if let Some(turn_id) = turn_id {
+                        self.on_server_overloaded_before_input_error(turn_id, message)
+                    } else {
+                        self.on_server_overloaded_error(message)
+                    }
+                }
                 RateLimitErrorKind::UsageLimit | RateLimitErrorKind::Generic => {
                     self.on_rate_limit_error(info, message)
                 }

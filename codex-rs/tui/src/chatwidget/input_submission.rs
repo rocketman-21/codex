@@ -337,8 +337,10 @@ impl ChatWidget {
             .filter(|_| self.current_model_supports_personality());
         let service_tier = self.service_tier_update_for_core();
         let active_permission_profile = self.config.permissions.active_permission_profile();
+        let client_user_message_id = uuid::Uuid::new_v4().to_string();
         let op = AppCommand::user_turn(
             items,
+            client_user_message_id.clone(),
             self.config.cwd.to_path_buf(),
             AskForApproval::from(self.config.permissions.approval_policy.value()),
             active_permission_profile,
@@ -353,9 +355,6 @@ impl ChatWidget {
 
         if !self.submit_op(op.clone()) {
             return (false, None);
-        }
-        if render_in_history {
-            self.input_queue.user_turn_pending_start = true;
         }
 
         // Persist the submitted text to cross-session message history. Mentions are encoded into
@@ -390,13 +389,16 @@ impl ChatWidget {
         }
 
         if render_in_history {
-            self.record_cancel_edit_candidate(UserMessage {
-                text: text.clone(),
-                local_images: local_images.clone(),
-                remote_image_urls: remote_image_urls.clone(),
-                text_elements: text_elements.clone(),
-                mention_bindings: mention_bindings.clone(),
-            });
+            self.record_cancel_edit_candidate(
+                UserMessage {
+                    text: text.clone(),
+                    local_images: local_images.clone(),
+                    remote_image_urls: remote_image_urls.clone(),
+                    text_elements: text_elements.clone(),
+                    mention_bindings: mention_bindings.clone(),
+                },
+                client_user_message_id,
+            );
         }
 
         // Show replayable user content in conversation history.

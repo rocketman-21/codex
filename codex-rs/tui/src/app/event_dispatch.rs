@@ -413,6 +413,11 @@ impl App {
             AppEvent::RestoreCancelledTurn(prompt) => {
                 self.apply_cancelled_turn_edit(prompt);
             }
+            AppEvent::DropOptimisticUserTurn => {
+                if self.apply_non_pending_thread_rollback(/*num_turns*/ 1) {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             AppEvent::AppendMessageHistoryEntry { thread_id, text } => {
                 self.append_message_history_entry(thread_id, text);
             }

@@ -22,6 +22,7 @@ use codex_protocol::models::local_image_label_text;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
 
+use super::CancelEditState;
 use super::ChatWidget;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +122,7 @@ impl ThreadComposerState {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     pub(super) composer: Option<ThreadComposerState>,
+    pub(super) cancel_edit: CancelEditState,
     pub(super) pending_steers: VecDeque<UserMessage>,
     pub(super) pending_steer_history_records: VecDeque<UserMessageHistoryRecord>,
     pub(super) pending_steer_compare_keys: VecDeque<PendingSteerCompareKey>,

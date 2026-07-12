@@ -58,6 +58,7 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
+                self.bind_cancel_edit_turn(notification.turn.id.as_str());
                 self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
                 self.last_non_retry_error = None;
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
@@ -135,6 +136,7 @@ impl ChatWidget {
                         notification.error.message.clone(),
                     ));
                     self.handle_non_retry_error(
+                        Some(notification.turn_id.as_str()),
                         notification.error.message,
                         notification.error.codex_error_info,
                     );
@@ -266,7 +268,11 @@ impl ChatWidget {
                     {
                         self.last_non_retry_error = None;
                     } else {
-                        self.handle_non_retry_error(error.message, error.codex_error_info);
+                        self.handle_non_retry_error(
+                            Some(notification.turn.id.as_str()),
+                            error.message,
+                            error.codex_error_info,
+                        );
                     }
                 } else {
                     self.last_non_retry_error = None;

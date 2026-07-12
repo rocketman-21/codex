@@ -932,8 +932,9 @@ async fn empty_enter_during_task_does_not_queue() {
 async fn output_free_interrupted_turn_requests_prompt_restore() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let prompt = UserMessage::from("revise this prompt");
-    chat.record_cancel_edit_candidate(prompt.clone());
+    chat.record_cancel_edit_candidate(prompt.clone(), "client-1".to_string());
     handle_turn_started(&mut chat, "turn-1");
+    chat.mark_cancel_edit_input_committed("turn-1", Some("client-1"));
 
     chat.submit_op(AppCommand::interrupt_and_restore_prompt_if_no_output());
     assert_matches!(
@@ -950,8 +951,12 @@ async fn output_free_interrupted_turn_requests_prompt_restore() {
 #[tokio::test]
 async fn visible_output_prevents_cancelled_turn_prompt_restore() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.record_cancel_edit_candidate(UserMessage::from("revise this prompt"));
+    chat.record_cancel_edit_candidate(
+        UserMessage::from("revise this prompt"),
+        "client-1".to_string(),
+    );
     handle_turn_started(&mut chat, "turn-1");
+    chat.mark_cancel_edit_input_committed("turn-1", Some("client-1"));
     chat.on_agent_message_delta("visible output".to_string());
     chat.submit_op(AppCommand::interrupt_and_restore_prompt_if_no_output());
 
@@ -966,8 +971,9 @@ async fn visible_output_prevents_cancelled_turn_prompt_restore() {
 async fn thinking_status_keeps_cancelled_turn_prompt_restore_eligible() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let prompt = UserMessage::from("revise this prompt");
-    chat.record_cancel_edit_candidate(prompt.clone());
+    chat.record_cancel_edit_candidate(prompt.clone(), "client-1".to_string());
     handle_turn_started(&mut chat, "turn-1");
+    chat.mark_cancel_edit_input_committed("turn-1", Some("client-1"));
     chat.on_agent_reasoning_delta("**Thinking**".to_string());
     chat.submit_op(AppCommand::interrupt_and_restore_prompt_if_no_output());
 
@@ -979,8 +985,12 @@ async fn thinking_status_keeps_cancelled_turn_prompt_restore_eligible() {
 #[tokio::test]
 async fn patch_activity_prevents_cancelled_turn_prompt_restore() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.record_cancel_edit_candidate(UserMessage::from("revise this prompt"));
+    chat.record_cancel_edit_candidate(
+        UserMessage::from("revise this prompt"),
+        "client-1".to_string(),
+    );
     handle_turn_started(&mut chat, "turn-1");
+    chat.mark_cancel_edit_input_committed("turn-1", Some("client-1"));
     chat.on_patch_apply_begin(HashMap::new());
     chat.submit_op(AppCommand::interrupt_and_restore_prompt_if_no_output());
 
@@ -1053,6 +1063,7 @@ async fn restore_thread_input_state_syncs_sleep_inhibitor_state() {
 
     chat.restore_thread_input_state(Some(ThreadInputState {
         composer: None,
+        cancel_edit: CancelEditState::default(),
         pending_steers: VecDeque::new(),
         pending_steer_history_records: VecDeque::new(),
         pending_steer_compare_keys: VecDeque::new(),

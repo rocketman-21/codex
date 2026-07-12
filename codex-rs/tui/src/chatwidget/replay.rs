@@ -73,7 +73,10 @@ impl ChatWidget {
         let from_replay = render_source.is_replay();
         let replay_kind = render_source.replay_kind();
         match item {
-            ThreadItem::UserMessage { content, .. } => {
+            ThreadItem::UserMessage {
+                client_id, content, ..
+            } => {
+                self.mark_cancel_edit_input_committed(turn_id.as_str(), client_id.as_deref());
                 self.on_committed_user_message(&content, from_replay);
             }
             ThreadItem::AgentMessage {

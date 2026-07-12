@@ -664,6 +664,9 @@ pub(crate) struct ChatWidget {
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
     cancel_edit: CancelEditState,
+    /// Whether the current candidate still has its optimistic user cell in App history.
+    /// Thread replay rebuilds history from server state, so this is intentionally not snapshotted.
+    cancel_edit_prompt_displayed: bool,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
     /// Keybinding to show for popping the most-recently queued message back
@@ -786,9 +789,12 @@ pub(crate) enum InterruptedTurnNoticeMode {
     Suppress,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct CancelEditState {
     prompt: Option<UserMessage>,
+    client_user_message_id: Option<String>,
+    turn_id: Option<String>,
+    input_committed: bool,
     eligible: bool,
     armed: bool,
 }

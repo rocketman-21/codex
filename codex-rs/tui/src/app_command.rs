@@ -33,6 +33,7 @@ pub(crate) enum AppCommand {
     },
     UserTurn {
         items: Vec<UserInput>,
+        client_user_message_id: String,
         cwd: PathBuf,
         approval_policy: AskForApproval,
         approvals_reviewer: Option<ApprovalsReviewer>,
@@ -134,6 +135,7 @@ impl AppCommand {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn user_turn(
         items: Vec<UserInput>,
+        client_user_message_id: String,
         cwd: PathBuf,
         approval_policy: AskForApproval,
         active_permission_profile: Option<ActivePermissionProfile>,
@@ -147,6 +149,7 @@ impl AppCommand {
     ) -> Self {
         Self::UserTurn {
             items,
+            client_user_message_id,
             cwd,
             approval_policy,
             approvals_reviewer: None,

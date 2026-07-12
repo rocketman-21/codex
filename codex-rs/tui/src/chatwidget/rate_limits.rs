@@ -130,6 +130,7 @@ pub(super) enum RateLimitSwitchPromptState {
 #[derive(Debug)]
 pub(super) enum RateLimitErrorKind {
     ServerOverloaded,
+    ServerOverloadedBeforeInput,
     UsageLimit,
     Generic,
 }
@@ -138,9 +139,9 @@ pub(super) fn app_server_rate_limit_error_kind(
     info: &AppServerCodexErrorInfo,
 ) -> Option<RateLimitErrorKind> {
     match info {
-        AppServerCodexErrorInfo::ServerOverloaded
-        | AppServerCodexErrorInfo::ServerOverloadedBeforeInput => {
-            Some(RateLimitErrorKind::ServerOverloaded)
+        AppServerCodexErrorInfo::ServerOverloaded => Some(RateLimitErrorKind::ServerOverloaded),
+        AppServerCodexErrorInfo::ServerOverloadedBeforeInput => {
+            Some(RateLimitErrorKind::ServerOverloadedBeforeInput)
         }
         AppServerCodexErrorInfo::UsageLimitExceeded => Some(RateLimitErrorKind::UsageLimit),
         AppServerCodexErrorInfo::ResponseTooManyFailedAttempts {
