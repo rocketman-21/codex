@@ -88,6 +88,7 @@ async fn handle_spawn_agent(
     )
     .await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    let configured_model = config.model.clone();
 
     let spawn_source = thread_spawn_source(
         session.thread_id,
@@ -143,6 +144,10 @@ async fn handle_spawn_agent(
         .as_ref()
         .and_then(|snapshot| snapshot.session_source.get_nickname())
         .or(spawned_agent.metadata.agent_nickname);
+    let model = agent_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.model.clone())
+        .or(configured_model);
     emit_sub_agent_activity(
         &session,
         turn,
@@ -151,6 +156,7 @@ async fn handle_spawn_agent(
             agent_thread_id: new_thread_id,
             agent_path: new_agent_path.clone(),
             kind: SubAgentActivityKind::Started,
+            model,
         },
     )
     .await;

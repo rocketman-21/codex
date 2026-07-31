@@ -1796,6 +1796,13 @@
             "kind": {
               "$ref": "#/definitions/SubAgentActivityKind"
             },
+            "model": {
+              "description": "Effective model selected for the sub-agent, when available.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "subAgentActivity"
@@ -1809,6 +1816,7 @@
             "agentThreadId",
             "id",
             "kind",
+            "model",
             "type"
           ],
           "title": "SubAgentActivityThreadItem",

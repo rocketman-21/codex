@@ -13,6 +13,7 @@ use app_test_support::create_shell_command_sse_response;
 use app_test_support::format_with_current_shell_display;
 use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use app_test_support::write_models_cache;
+use app_test_support::write_models_cache_with_models;
 use codex_app_server::INPUT_TOO_LARGE_ERROR_CODE;
 use codex_app_server::INVALID_PARAMS_ERROR_CODE;
 use codex_app_server_protocol::AdditionalContextEntry;
@@ -65,6 +66,7 @@ use codex_app_server_protocol::WarningNotification;
 use codex_core::test_support::all_model_presets;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_features::Feature;
+use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::MultiAgentMode;
@@ -3349,6 +3351,146 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         })
         .await?;
     assert_eq!(data, Vec::<String>::new());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_activity_exposes_effective_model() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const CHILD_PROMPT: &str = "child: do work";
+    const PARENT_PROMPT: &str = "spawn a child and continue";
+    const SPAWN_CALL_ID: &str = "spawn-call-effective-model";
+    const CHILD_MODEL: &str = "gpt-5.6-sol";
+
+    let server = responses::start_mock_server().await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "model": CHILD_MODEL,
+        "fork_turns": "none",
+    }))?;
+    let _parent_turn = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, PARENT_PROMPT),
+        responses::sse(vec![
+            responses::ev_response_created("resp-parent-model-1"),
+            responses::ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            responses::ev_completed("resp-parent-model-1"),
+        ]),
+    )
+    .await;
+    let _child_turn = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("resp-child-model-1"),
+            responses::ev_assistant_message("msg-child-model-1", "child done"),
+            responses::ev_completed("resp-child-model-1"),
+        ]),
+    )
+    .await;
+    let _parent_follow_up = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        responses::sse(vec![
+            responses::ev_response_created("resp-parent-model-2"),
+            responses::ev_assistant_message("msg-parent-model-2", "parent done"),
+            responses::ev_completed("resp-parent-model-2"),
+        ]),
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .enable_feature(Feature::MultiAgentV2)
+        .write(codex_home.path())?;
+    write_models_cache_with_models(codex_home.path(), bundled_models_response()?.models)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        })
+        .await?;
+
+    let turn: TurnStartResponse = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![V2UserInput::Text {
+                    text: PARENT_PROMPT.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let started_item = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
+            if let ThreadItem::SubAgentActivity { id, .. } = &started.item
+                && id == SPAWN_CALL_ID
+            {
+                return Ok::<ThreadItem, anyhow::Error>(started.item);
+            }
+        }
+    })
+    .await??;
+    let ThreadItem::SubAgentActivity {
+        agent_thread_id, ..
+    } = &started_item
+    else {
+        unreachable!("loop ensures we break on sub-agent activity items");
+    };
+    let expected_item = ThreadItem::SubAgentActivity {
+        id: SPAWN_CALL_ID.to_string(),
+        kind: SubAgentActivityKind::Started,
+        agent_thread_id: agent_thread_id.clone(),
+        agent_path: "/root/worker".to_string(),
+        model: Some(CHILD_MODEL.to_string()),
+    };
+    assert_eq!(started_item, expected_item);
+
+    let completed_item = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed: ItemCompletedNotification =
+                mcp.read_notification("item/completed").await?;
+            if let ThreadItem::SubAgentActivity { id, .. } = &completed.item
+                && id == SPAWN_CALL_ID
+            {
+                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(completed_item, expected_item);
+
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed: TurnCompletedNotification =
+                mcp.read_notification("turn/completed").await?;
+            if completed.thread_id == thread.id && completed.turn.id == turn.turn.id {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
 
     Ok(())
 }

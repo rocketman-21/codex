@@ -2195,7 +2195,9 @@ async fn subagent_activity_emits_matching_start_and_completion() {
         kind: codex_protocol::protocol::SubAgentActivityKind::Started,
         agent_thread_id: ThreadId::new(),
         agent_path: AgentPath::root(),
+        model: Some("gpt-5.2".to_string()),
     };
+    let expected_item = item.clone();
 
     crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity(&session, &turn_context, item)
         .await;
@@ -2207,6 +2209,14 @@ async fn subagent_activity_emits_matching_start_and_completion() {
     else {
         panic!("expected completed item event");
     };
+    let TurnItem::SubAgentActivity(started_item) = started.item else {
+        panic!("expected started sub-agent activity item");
+    };
+    let TurnItem::SubAgentActivity(completed_item) = completed.item else {
+        panic!("expected completed sub-agent activity item");
+    };
+    assert_eq!(started_item, expected_item);
+    assert_eq!(completed_item, expected_item);
     assert_eq!(completed.started_at_ms, Some(started.started_at_ms));
 }
 
