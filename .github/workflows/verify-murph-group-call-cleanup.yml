@@ -1,0 +1,87 @@
+name: Verify Murph group call cleanup
+
+on:
+  push:
+    branches:
+      - agent/murph-group-call-verify-codex
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Fetch immutable Murph audit branch
+        run: |
+          git init murph
+          cd murph
+          git remote add origin https://github.com/cobuildwithus/murph.git
+          git fetch --depth=20 origin agent/remove-group-call-preview-clean
+          git checkout --detach 54fcbde3b8e1cd29f96a3777f5406ecd9b909936
+          test "$(git rev-parse HEAD)" = 54fcbde3b8e1cd29f96a3777f5406ecd9b909936
+          git cat-file -e a2810215961fb1d31e81c5f6fb2358a72d74febc^{commit}
+
+      - name: Apply guarded cleanup and remove temporary scaffolding
+        working-directory: murph
+        run: |
+          python scripts/apply-group-call-cleanup.py
+          rm scripts/apply-group-call-cleanup.py
+          rm .github/workflows/apply-group-call-cleanup.yml
+          git diff --check
+          if git grep -n -E 'currentGroupPhoneCallPreviewAuthority|resolveDeliveredAssistantGroupPhoneCallPreviewAuthority|AssistantGroupPhoneCallPreviewAuthority|group-phone-call-preview-authority' -- packages/assistant-engine; then
+            echo 'Legacy group-call preview authority machinery remains.' >&2
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: murph/.nvmrc
+          cache: pnpm
+          cache-dependency-path: murph/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: murph
+        run: pnpm install --frozen-lockfile
+
+      - name: Run focused assistant-engine tests
+        working-directory: murph
+        run: >-
+          pnpm --dir packages/assistant-engine exec vitest run
+          --config vitest.config.ts
+          --no-coverage
+          test/assistant-phone-calls.test.ts
+          test/assistant-capability-policy-skills.test.ts
+          test/assistant-codex-turn-planning.test.ts
+          test/assistant-codex-scripted-runtime.test.ts
+          test/assistant-codex-real-e2e.test.ts
+
+      - name: Typecheck assistant-engine
+        working-directory: murph
+        run: pnpm --dir packages/assistant-engine typecheck
+
+      - name: Package exact verified changes
+        working-directory: murph
+        run: |
+          base=a2810215961fb1d31e81c5f6fb2358a72d74febc
+          mkdir -p ../verified
+          git diff --binary "$base" > ../verified/verified.patch
+          git diff --stat "$base" > ../verified/diff-stat.txt
+          git diff --name-only --diff-filter=D "$base" > ../verified/deleted-files.txt
+          git diff --name-only --diff-filter=ACMRT "$base" -z \
+            | tar --null -T - -czf ../verified/verified-files.tar.gz
+          sha256sum ../verified/verified.patch ../verified/verified-files.tar.gz \
+            > ../verified/SHA256SUMS
+
+      - name: Upload verified patch and files
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-murph-group-call-cleanup
+          path: verified
+          if-no-files-found: error
+          retention-days: 1
